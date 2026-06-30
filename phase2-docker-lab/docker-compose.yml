@@ -1,0 +1,53 @@
+services:
+  api:
+    build: ./api
+    command: node --inspect=0.0.0.0:9229 server.js # 1. Added debug command (replace index.js with your entry point)
+    ports:
+      - "3000:3000"
+      - "9229:9229" # 2. Exposed unique debug port
+    volumes:
+      - ./api:/usr/src/app # 3. Mounted local code to sync breakpoints
+    working_dir: /usr/src/app
+    env_file:
+      - .env
+    environment:
+      MONGO_URL: mongodb://mongodb:27017/phase2
+      DB_NAME: phase2
+      PORT: 3000
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+  worker:
+    build: ./worker
+    command: node --inspect=0.0.0.0:9230 worker.js # 1. Added debug command on a different port
+    ports:
+      - "9230:9230" # 2. Exposed unique worker debug port
+    volumes:
+      - ./worker:/usr/src/app # 3. Mounted local worker code
+    working_dir: /usr/src/app
+    env_file:
+      - .env
+    environment:
+      MONGO_URL: mongodb://mongodb:27017/phase2
+      DB_NAME: phase2
+      POLL_INTERVAL_MS: 3000
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+  mongodb:
+    image: mongo:7
+    ports:
+      - "27019:27017"
+    volumes:
+      - phase2-mongo-data:/data/db
+    healthcheck:
+      test:
+        ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  phase2-mongo-data:

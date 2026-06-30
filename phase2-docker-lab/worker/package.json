@@ -1,0 +1,11 @@
+{
+  "name": "phase2-worker",
+  "version": "1.0.0",
+  "main": "worker.js",
+  "scripts": {
+    "start": "node worker.js"
+  },
+  "dependencies": {
+    "mongodb": "^6.8.0"
+  }
+}
