@@ -83,8 +83,8 @@ spec:
               cpu: "500m"
               memory: "512Mi"
             requests:
-              cpu: "200m"
-              memory: "256Mi"
+              cpu: "100m" # Small "guaranteed" size so a little real traffic pushes usage past 100% fast, triggering scale-up sooner
+              memory: "128Mi"
 ---
 apiVersion: v1
 kind: Service
@@ -127,8 +127,8 @@ spec:
               cpu: "500m"
               memory: "512Mi"
             requests:
-              cpu: "200m"
-              memory: "256Mi"
+              cpu: "100m" # Small "guaranteed" size so a little real traffic pushes usage past 100% fast, triggering scale-up sooner
+              memory: "128Mi"
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -147,7 +147,20 @@ spec:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 20 # Low CPU threshold because API waiting states use low CPU but block queues
+          averageUtilization: 10 # Very low threshold so even light job activity trips the scaler almost immediately (great for the live demo)
+  behavior: # Controls HOW FAST Kubernetes reacts once the threshold above is crossed
+    scaleUp:
+      stabilizationWindowSeconds: 0 # Do NOT wait/average before adding pods - react the instant load appears
+      policies:
+        - type: Percent
+          value: 100 # Allow doubling the number of pods...
+          periodSeconds: 15 # ...every 15 seconds
+        - type: Pods
+          value: 4 # ...OR add up to 4 brand-new pods...
+          periodSeconds: 15 # ...every 15 seconds
+      selectPolicy: Max # Whichever of the two rules above adds MORE pods wins (fastest scale-out)
+    scaleDown:
+      stabilizationWindowSeconds: 30 # After traffic stops, wait only 30s before removing pods (default is 300s) so the demo resets quickly
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -163,7 +176,20 @@ spec:
   metrics:
     - type: Resource
       resource:
-        name: memory
+        name: cpu
         target:
           type: Utilization
-          averageUtilization: 60 # Scales based on concurrent memory usage
+          averageUtilization: 30 # CPU-based (HTTP request floods spike CPU, not memory) and low so the traffic-loop demo triggers scaling in seconds
+  behavior: # Controls HOW FAST Kubernetes reacts once the threshold above is crossed
+    scaleUp:
+      stabilizationWindowSeconds: 0 # Do NOT wait/average before adding pods - react the instant load appears
+      policies:
+        - type: Percent
+          value: 100 # Allow doubling the number of pods...
+          periodSeconds: 15 # ...every 15 seconds
+        - type: Pods
+          value: 4 # ...OR add up to 4 brand-new pods...
+          periodSeconds: 15 # ...every 15 seconds
+      selectPolicy: Max # Whichever of the two rules above adds MORE pods wins (fastest scale-out)
+    scaleDown:
+      stabilizationWindowSeconds: 30 # After traffic stops, wait only 30s before removing pods (default is 300s) so the demo resets quickly
