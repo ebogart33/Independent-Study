@@ -83,7 +83,7 @@ spec:
               cpu: "500m"
               memory: "512Mi"
             requests:
-              cpu: "100m" # Small "guaranteed" size so a little real traffic pushes usage past 100% fast, triggering scale-up sooner
+              cpu: "50m" # Tiny request: HPA reports usage as a % of THIS, so a small CPU load already reads as a high % and trips scaling fast
               memory: "128Mi"
 ---
 apiVersion: v1
@@ -130,37 +130,67 @@ spec:
               cpu: "100m" # Small "guaranteed" size so a little real traffic pushes usage past 100% fast, triggering scale-up sooner
               memory: "128Mi"
 ---
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
+# KEDA's operator runs in the kube-system namespace, so it CANNOT resolve the short name
+# "mongodb-service" (short names only resolve inside their own namespace). This Secret gives
+# KEDA the FULLY-QUALIFIED address mongodb-service.default.svc.cluster.local so it can connect.
+apiVersion: v1
+kind: Secret
 metadata:
-  name: worker-hpa # Scales the background worker processing the OpenAI jobs
+  name: mongodb-keda-secret
+type: Opaque
+stringData:
+  # Change ".default." if you deploy these objects into a different namespace.
+  connectionString: "mongodb://mongodb-service.default.svc.cluster.local:27017/phase2"
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: mongodb-keda-auth
+spec:
+  secretTargetRef:
+    - parameter: connectionString # The KEDA mongodb scaler auth parameter name
+      name: mongodb-keda-secret # The Secret above
+      key: connectionString # The key within that Secret
+---
+# The worker is a QUEUE CONSUMER, not a CPU-bound web server. In real API mode it spends
+# almost all of its time WAITING on the OpenAI HTTP call (I/O wait uses little CPU), so a
+# CPU-based HPA would barely react. Instead we use KEDA to scale on the actual backlog:
+# the number of jobs in MongoDB whose status is still "queued".
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-scaledobject # KEDA object that scales the worker on the job backlog
 spec:
   scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: worker-deployment
-  minReplicas: 1
-  maxReplicas: 8
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 10 # Very low threshold so even light job activity trips the scaler almost immediately (great for the live demo)
-  behavior: # Controls HOW FAST Kubernetes reacts once the threshold above is crossed
-    scaleUp:
-      stabilizationWindowSeconds: 0 # Do NOT wait/average before adding pods - react the instant load appears
-      policies:
-        - type: Percent
-          value: 100 # Allow doubling the number of pods...
-          periodSeconds: 15 # ...every 15 seconds
-        - type: Pods
-          value: 4 # ...OR add up to 4 brand-new pods...
-          periodSeconds: 15 # ...every 15 seconds
-      selectPolicy: Max # Whichever of the two rules above adds MORE pods wins (fastest scale-out)
-    scaleDown:
-      stabilizationWindowSeconds: 30 # After traffic stops, wait only 30s before removing pods (default is 300s) so the demo resets quickly
+    name: worker-deployment # The Deployment KEDA will grow and shrink (defaults to kind: Deployment)
+  minReplicaCount: 1 # Keep at least 1 worker running at all times
+  maxReplicaCount: 8 # Never run more than 8 workers
+  pollingInterval: 5 # How often (seconds) KEDA queries MongoDB for the backlog (default is 30)
+  cooldownPeriod: 30 # Seconds the queue must stay empty before scaling back to minReplicaCount (default is 300)
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior: # KEDA still creates an HPA under the hood, so we can tune reaction speed here
+        scaleUp:
+          stabilizationWindowSeconds: 0 # React instantly when the backlog grows
+          policies:
+            - type: Percent
+              value: 100 # Allow doubling the number of workers...
+              periodSeconds: 15 # ...every 15 seconds
+            - type: Pods
+              value: 4 # ...OR add up to 4 brand-new workers...
+              periodSeconds: 15 # ...every 15 seconds
+          selectPolicy: Max # Whichever rule adds MORE workers wins (fastest drain)
+        scaleDown:
+          stabilizationWindowSeconds: 30 # After the queue empties, wait 30s before removing workers
+  triggers:
+    - type: mongodb
+      metadata:
+        dbName: phase2 # Database name (matches DB_NAME / the /phase2 in MONGO_URL)
+        collection: jobs # The collection the API writes jobs into
+        query: '{ "status": "queued" }' # Count ONLY jobs that are still waiting to be processed
+        queryValue: "5" # Target ~5 queued jobs per worker; desiredWorkers = ceil(queuedCount / 5)
+      authenticationRef:
+        name: mongodb-keda-auth # Provides the fully-qualified MongoDB connection string (see Secret above)
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -179,7 +209,7 @@ spec:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 30 # CPU-based (HTTP request floods spike CPU, not memory) and low so the traffic-loop demo triggers scaling in seconds
+          averageUtilization: 20 # CPU-based (HTTP request floods spike CPU, not memory) and low so a modest traffic loop trips scaling in seconds
   behavior: # Controls HOW FAST Kubernetes reacts once the threshold above is crossed
     scaleUp:
       stabilizationWindowSeconds: 0 # Do NOT wait/average before adding pods - react the instant load appears
