@@ -164,6 +164,13 @@ az aks create \
 - `--node-count 1` gives you a single, cheap worker VM (fine for a demo).
 - `--attach-acr` lets the cluster pull images from your registry with no extra login.
 
+> **Record these now.** Write down your **resource group** and **cluster name** the moment you create them — you will paste them into the demo script and the shutdown commands later:
+>
+> ```powershell
+> $rg      = "IndI"                 # your resource group
+> $cluster = "ethanb-aks-cluster"   # your cluster name
+> ```
+
 ---
 
 # Part 4 - Connect kubectl to Your Cluster
@@ -631,6 +638,12 @@ http://<YOUR_EXTERNAL_IP>:3000
 
 You should see the same "Phase 2 Docker AI Worker Lab" page from Phase 2 — now served from the cloud. Submit a prompt to confirm the API, worker, and MongoDB are all working together.
 
+> **Record this now.** Write down your public IP the moment you get it — you will paste it into the demo script later:
+>
+> ```powershell
+> $ip = "<YOUR_EXTERNAL_IP>"   # the EXTERNAL-IP from above
+> ```
+
 ---
 
 # Part 10 - Verify the Autoscalers Are Active
@@ -670,193 +683,76 @@ The HPA `TARGETS` column shows current usage vs. your threshold. If it shows `<u
 
 ---
 
-# Part 11 - The API Scaling Demo (CPU-based, watch new pods get created live)
+# Part 11 - The Scalability Demo (one script scales BOTH the API and the workers)
 
-This demonstrates the **`api-hpa`** creating new **API** pods under HTTP load. It is the simplest, most visual demo. (Part 11b demonstrates the **worker** scaling on the job queue, which is the design that best matches this app.) The manifest is deliberately tuned to scale up **quickly** so you can capture the moment on screen (see Part 12).
+One stream of `POST /api/jobs` requests exercises the whole system, so a **single** workload generator drives **both** autoscalers at once:
 
-## 1. Open two terminal windows side-by-side
+- Each request makes the **API** parse JSON and write to MongoDB, so **API CPU** rises and `api-hpa` adds API pods.
+- Each request also adds a `queued` job to the backlog, so **KEDA** (`worker-scaledobject`) adds worker pods to drain it.
 
-Make sure the cluster is running (`az aks start ...`) and `kubectl` is connected.
+That is why we no longer need separate load scripts — one POST loop covers everything.
 
-## 2. Set up the live monitor (Window 1)
+## 1. Set your variables
+
+Throughout this lab you collected three values. You should have recorded them as soon as you got them (see the callouts in Parts 3 and 9). You will paste them into the demo script below.
+
+| Variable   | What it is                              | Look it up again with             |
+| ---------- | --------------------------------------- | --------------------------------- |
+| `$ip`      | the API's public `EXTERNAL-IP` (Part 9) | `kubectl get service api-service` |
+| `$rg`      | your Azure resource group (Part 3)      | `az group list -o table`          |
+| `$cluster` | your AKS cluster name (Part 3)          | `az aks list -o table`            |
+
+## 2. Verify the endpoint works (single request)
+
+Before generating load, confirm one job goes through:
+
+```powershell
+$ip = "<YOUR_EXTERNAL_IP>"
+Invoke-RestMethod -Uri "http://$ip:3000/api/jobs" -Method Post -ContentType "application/json" -Body '{"prompt":"verify"}'
+```
+
+A real `_id` and `status: queued` in the response mean the write reached MongoDB. (You can also refresh `http://<YOUR_EXTERNAL_IP>:3000` and see it under **Recent Jobs**.)
+
+## 3. Open two monitor windows
+
+**Window 1 — API scaling (CPU):**
 
 ```bash
 kubectl get hpa,pods --watch
 ```
 
-Keep an eye on the `TARGETS` column and the number of pods.
-
-## 3. Launch the load generator (Window 2)
-
-Get the public IP with `kubectl get svc api-service`.
-
-> **Important:** a _single_ `while ($true) { Invoke-RestMethod ... }` loop is **not enough load**. It sends one request at a time and waits for the full round-trip to Azure before sending the next (~20-40 requests/second), which only pushes CPU to ~15%. To trip the autoscaler you must send **many requests at the same time (concurrently)**.
-
-**Best option — parallel `curl.exe` processes (Windows 10/11 include `curl.exe`):**
-
-This launches 50 hidden processes, each firing a long burst of requests, giving ~50 concurrent connections continuously:
-
-```powershell
-$ip = "<YOUR_EXTERNAL_IP>"
-1..50 | ForEach-Object {
-  Start-Process -WindowStyle Hidden -FilePath "curl.exe" `
-    -ArgumentList "-s", "-o", "NUL", "http://$ip:3000/?[1-100000]"
-}
-```
-
-To **stop** the load later:
-
-```powershell
-Get-Process curl -ErrorAction SilentlyContinue | Stop-Process -Force
-```
-
-**PowerShell 7 alternative (`ForEach-Object -Parallel`):**
-
-```powershell
-$ip = "<YOUR_EXTERNAL_IP>"
-1..50 | ForEach-Object -Parallel {
-  while ($true) { try { Invoke-WebRequest -Uri "http://$using:ip:3000" -UseBasicParsing | Out-Null } catch {} }
-} -ThrottleLimit 50
-```
-
-**bash (macOS/Linux) — 50 parallel loops:**
-
-```bash
-IP=<YOUR_EXTERNAL_IP>
-for i in $(seq 1 50); do
-  ( while true; do curl -s "http://$IP:3000" > /dev/null; done ) &
-done
-# stop later with:  kill $(jobs -p)
-```
-
-Whichever you use, watch `kubectl top pods` in a third window — you should see the API pod's CPU climb well past its request. If CPU still stays low, add more parallel workers (change `1..50` to `1..100`).
-
-## 3b. Verify the POST method actually writes to the site
-
-The load above sends `GET` requests, which only _read_ the page. To prove the **POST** method works end-to-end (browser -> API -> MongoDB -> worker), send a real job with a JSON body to the `/api/jobs` endpoint.
-
-**Step 1 — Send one job and read the response:**
-
-```powershell
-$ip = "<YOUR_EXTERNAL_IP>"
-$body = '{"prompt":"Verify POST from PowerShell"}'
-Invoke-RestMethod -Uri "http://$ip:3000/api/jobs" -Method Post -ContentType "application/json" -Body $body
-```
-
-If the POST got through, the API echoes back the created job (this is your proof):
-
-```text
-_id       : 6661a2b3c4d5e6f789012345
-prompt    : Verify POST from PowerShell
-status    : queued
-response  :
-error     :
-createdAt : 2026-07-07T16:50:00.000Z
-updatedAt : 2026-07-07T16:50:00.000Z
-```
-
-A `status` of `queued` and a real `_id` mean the write reached MongoDB.
-
-**Step 2 — Confirm it was stored (and later processed):**
-
-```powershell
-Invoke-RestMethod -Uri "http://$ip:3000/api/jobs" -Method Get |
-  Format-Table _id, status, prompt
-```
-
-Run it again after a few seconds — the worker should flip the `status` from `queued` to `completed`. You can also just refresh `http://<YOUR_EXTERNAL_IP>:3000` in the browser and watch the job appear in the **Recent Jobs** list.
-
-**Step 3 — Generate load by POSTing continuously (writes AND drives scaling):**
-
-The most reliable way is to run the **same `Invoke-RestMethod` call you just verified**, in parallel background jobs. (Do **not** try to pass the JSON body through `Start-Process -ArgumentList` — PowerShell mangles the embedded quotes, so `curl` receives a broken body and the API rejects it with `400 Prompt is required`, creating no jobs.)
-
-```powershell
-$ip = "<YOUR_EXTERNAL_IP>"
-$body = '{"prompt":"load test job"}'
-
-# 20 parallel background loops that POST jobs continuously
-1..20 | ForEach-Object {
-  Start-Job -ArgumentList $ip, $body -ScriptBlock {
-    param($ip, $body)
-    while ($true) {
-      try { Invoke-RestMethod -Uri "http://$ip:3000/api/jobs" -Method Post -ContentType "application/json" -Body $body | Out-Null } catch {}
-    }
-  } | Out-Null
-}
-```
-
-Confirm jobs are being created (run it a few times — the count should keep climbing):
-
-```powershell
-(Invoke-RestMethod -Uri "http://$ip:3000/api/jobs" -Method Get).Count
-```
-
-Stop the load when you are done:
-
-```powershell
-Get-Job | Stop-Job
-Get-Job | Remove-Job
-```
-
-**Higher-throughput alternative (`curl.exe` with the body in a file):** putting the JSON in a file avoids the quoting problem entirely, and URL globbing (`?[1-100000]`) makes each process repeat the POST 100,000 times:
-
-```powershell
-$ip = "<YOUR_EXTERNAL_IP>"
-Set-Content -Path body.json -Value '{"prompt":"load test job"}' -NoNewline -Encoding ascii
-1..20 | ForEach-Object {
-  Start-Process -WindowStyle Hidden -FilePath "curl.exe" -ArgumentList `
-    "-s","-o","NUL","-X","POST","http://$ip:3000/api/jobs?[1-100000]", `
-    "-H","Content-Type: application/json","-d","@body.json"
-}
-# stop with: Get-Process curl -ErrorAction SilentlyContinue | Stop-Process -Force
-```
-
-> Note: this creates a very large number of jobs in MongoDB. That is fine for a demo (it shows the queue filling up), but reset the database later if you want a clean list. The `?[1-100000]` in the URL is just a counter that makes `curl.exe` repeat the POST — the query string is ignored by the API.
-
-## 4. Watch the autoscaler fire (Window 1)
-
-Within roughly **30 to 90 seconds** you will see this chain reaction:
-
-1. **Metrics spike** — the HPA `TARGETS` percentage climbs past its threshold (e.g. jumps from `5%/20%` to `150%/20%`).
-2. **Scale event** — the replica count jumps up.
-3. **New pods appear** — new pod rows show up going `Pending -> ContainerCreating -> Running`.
-
-Take your screenshots here.
-
-## 5. Stop the test and watch it scale back down
-
-Press `Ctrl + C` in Window 2 to stop the traffic. After the short cool-down window (about 30 seconds of calm, configured in the manifest), Kubernetes deletes the extra pods and returns to 1 replica to save credits.
-
----
-
-# Part 11b - The Worker Scaling Demo (queue depth, via KEDA)
-
-This is the demo that best reflects how the app actually works: as the **job backlog** grows in MongoDB, KEDA creates more **worker** pods to drain it, then removes them when the queue empties.
-
-## 1. (Optional) Make the backlog dramatic with real API mode
-
-In **demo mode** the worker completes each job instantly, so a single worker can often keep the queue near empty and you may not see much scaling. To make the backlog build up visibly, use **real API mode** (set `DEMO_MODE=false` and a valid `OPENAI_API_KEY` when you build/push the worker image) so each job takes real time, or simply fire a very large POST burst so jobs arrive faster than one worker can process them.
-
-## 2. Set up the live monitor (Window 1)
+**Window 2 — worker scaling (queue depth):**
 
 ```bash
 kubectl get scaledobject,pods --watch
 ```
 
-Also handy in a second window — watch the backlog count and worker HPA directly:
+## 4. Run the demo script (Window 3)
 
-```bash
-kubectl get hpa keda-hpa-worker-scaledobject --watch
-```
-
-## 3. Flood the queue with jobs (Window 2)
-
-Use the continuous **POST** generator from Part 11, step 3b (it inserts `queued` jobs as fast as possible):
+Paste your three values at the top, then run the whole script. It generates load (**scale up**), stops the load and pauses so you can watch pods return to 1 (**scale down**), and then **automatically runs `az aks stop`** so the cluster stops burning credits the moment the demo is over:
 
 ```powershell
-$ip = "<YOUR_EXTERNAL_IP>"
-$body = '{"prompt":"load test job"}'
-1..20 | ForEach-Object {
+# ============================================================
+#  Phase 3 Scalability Demo
+#  Loads the API AND the workers with one POST stream, then
+#  automatically stops the cluster when the load finishes.
+# ============================================================
+
+# --- Paste YOUR values here (you recorded these earlier) ---
+$ip      = "<YOUR_EXTERNAL_IP>"      # api-service EXTERNAL-IP   (kubectl get service api-service)
+$rg      = "<YOUR_RESOURCE_GROUP>"   # e.g. IndI
+$cluster = "<YOUR_CLUSTER_NAME>"     # e.g. ethanb-aks-cluster
+
+# --- Workload settings (tweak if you want) ---
+$body         = '{"prompt":"load test job"}'  # the job body every request sends
+$parallel     = 20                             # how many concurrent POST loops
+$durationSec  = 180                            # how long to generate load (seconds)
+$scaleDownSec = 150                            # how long to watch pods scale back down before stopping
+
+Write-Host "Generating load against http://$ip:3000 for $durationSec seconds..."
+
+# Each POST loads the API (CPU) AND adds a queued job (worker backlog) -> both autoscalers react.
+1..$parallel | ForEach-Object {
   Start-Job -ArgumentList $ip, $body -ScriptBlock {
     param($ip, $body)
     while ($true) {
@@ -864,28 +760,44 @@ $body = '{"prompt":"load test job"}'
     }
   } | Out-Null
 }
-# stop with: Get-Job | Stop-Job; Get-Job | Remove-Job
+
+# Phase 1: SCALE UP - let the load run. Watch your two monitor windows now.
+Start-Sleep -Seconds $durationSec
+
+# Stop generating load so the pods are allowed to scale back down.
+Write-Host "Load finished. Stopping generators..."
+Get-Job | Stop-Job
+Get-Job | Remove-Job
+
+# Phase 2: SCALE DOWN - keep the cluster running and watch the pods drop back to 1.
+Write-Host "Now watch your monitor windows for $scaleDownSec seconds: pods should return to 1 replica..."
+Start-Sleep -Seconds $scaleDownSec
+
+# Phase 3: SHUT DOWN - pause the cluster so it stops consuming credits.
+Write-Host "Stopping cluster '$cluster' in resource group '$rg'..."
+az aks stop --resource-group $rg --name $cluster
+
+Write-Host "Done. Restart later with: az aks start --resource-group $rg --name $cluster"
 ```
 
-## 4. Watch the worker scale on the backlog (Window 1)
+The script now runs in three phases: **scale up** (load for `$durationSec`), **scale down** (idle for `$scaleDownSec` so you can watch the extra API and worker pods disappear back to 1 replica), then **shut down** (`az aks stop`). The `$scaleDownSec` default of 150s comfortably covers the 30s cool-down windows plus the time for pods to terminate.
 
-Within a few polling cycles (KEDA checks every 5 seconds) you will see:
+## 5. What you will see
 
-1. **Backlog grows** — the HPA target climbs (e.g. `0/5` -> `50/5 (avg)`) as `queued` jobs pile up.
-2. **Workers multiply** — `worker-deployment` replicas jump from 1 toward the max of 8, each new worker showing `Pending -> ContainerCreating -> Running`.
-3. **Queue drains** — with 8 workers each claiming jobs (safely, one at a time), the backlog falls.
+Watch Windows 1 and 2 through the three phases:
 
-Because `queryValue` is `5`, KEDA aims for one worker per ~5 queued jobs, so a large backlog quickly requests all 8 workers.
+**Scale up (during the load):**
 
-## 5. Stop and scale back down
+- **API (Window 1):** `api-hpa` `TARGETS` climbs past `20%`, and `api-deployment` pods scale from 1 up toward 5, each new pod going `Pending -> ContainerCreating -> Running`.
+- **Worker (Window 2):** the backlog on `keda-hpa-worker-scaledobject` climbs (e.g. `0/5` -> `80/5`), and `worker-deployment` pods scale from 1 up toward 8, then drain the queue.
 
-Stop the POST flood:
+**Scale down (after the load stops):** with no traffic, `TARGETS` fall back toward `0`, and after the 30s cool-down windows the extra API and worker pods terminate (`Terminating`) until each deployment is back to **1 replica**.
 
-```powershell
-Get-Process curl -ErrorAction SilentlyContinue | Stop-Process -Force
-```
+**Shut down:** once the scale-down window ends, the script runs `az aks stop` and the cluster begins stopping.
 
-Once the workers drain the remaining backlog and the queue stays empty for the `cooldownPeriod` (30 seconds), KEDA scales the worker back down to 1.
+Take your screenshots during both the scale-up and scale-down phases.
+
+> **Tip:** in **demo mode** the worker finishes jobs almost instantly, so the queue may stay small and the worker may not scale much. To force a dramatic backlog, raise `$parallel` (e.g. `50`) or use **real API mode** (`DEMO_MODE=false` + a valid `OPENAI_API_KEY` when you build the worker image) so each job takes real time.
 
 ---
 
@@ -900,14 +812,16 @@ Several deliberate choices in the manifest make new pods appear _sooner_ so the 
 
 ## The Load Generator Matters Most
 
-Even with aggressive autoscalers, **you must actually generate enough load**:
+Even with aggressive autoscalers, **you must actually generate enough load**. The single POST script in Part 11 handles both autoscalers, but keep two things in mind:
 
-- For the **API (CPU) demo**, a single sequential loop (`while ($true) { Invoke-RestMethod ... }`) only produces ~15% CPU because it waits for each request before sending the next. Use the **parallel** generators in Part 11 (50+ concurrent requests).
-- For the **worker (queue) demo**, you need jobs to arrive faster than one worker can process them. In demo mode the worker is very fast, so use a big POST burst (Part 11b) or real API mode so each job takes real time and the backlog builds.
+- **Use parallelism.** A single sequential loop (`while ($true) { Invoke-RestMethod ... }`) only produces ~15% CPU because it waits for each request before sending the next. The demo script runs `$parallel` loops at once (default 20) — raise it to 50 if scaling looks weak.
+- **Make the queue back up.** For the worker to scale, jobs must arrive faster than one worker can process them. In demo mode the worker is very fast, so use more parallel loops or **real API mode** (each job then takes real time and the backlog builds).
 
 ---
 
 # Part 13 - Pause and Restart the Cluster (protect your credits)
+
+> The demo script in Part 11 already runs `az aks stop` for you when it finishes. Use the commands here for any other time you need to pause or resume the cluster manually.
 
 ## Pause the cluster (do this at the end of each day)
 
@@ -1007,7 +921,7 @@ Common causes:
 
 ## Problem: Workers don't scale up even with a backlog
 
-1. Confirm there is actually a backlog: the demo-mode worker completes jobs almost instantly, so a single worker may keep the queue near empty. Fire a bigger POST burst or use real API mode (Part 11b, step 1).
+1. Confirm there is actually a backlog: the demo-mode worker completes jobs almost instantly, so a single worker may keep the queue near empty. Raise `$parallel` in the demo script or use real API mode (see the tip in Part 11, step 5).
 2. Check the current queue value on the HPA: `kubectl get hpa keda-hpa-worker-scaledobject`.
 3. Confirm the ScaledObject is `ACTIVE: True`: `kubectl get scaledobject`.
 
@@ -1030,9 +944,9 @@ Students should submit screenshots showing:
 2. `kubectl get service api-service` showing the public `EXTERNAL-IP`.
 3. The browser page loaded from `http://<YOUR_EXTERNAL_IP>:3000`.
 4. `kubectl get hpa` and `kubectl get scaledobject` showing both autoscalers active (`worker-scaledobject` should be `READY: True`).
-5. **API demo:** `kubectl get hpa,pods --watch` during the HTTP load test, showing the `TARGETS` percentage over threshold and **new API pods being created** (`Pending`/`ContainerCreating`/`Running`).
-6. **Worker demo:** `kubectl get scaledobject,pods --watch` during the POST/job flood, showing the queue backlog growing and **new worker pods being created**.
-7. Both deployments returning to 1 replica after the load stops.
+5. **API scaling:** `kubectl get hpa,pods --watch` during the demo script, showing the `TARGETS` percentage over threshold and **new API pods being created** (`Pending`/`ContainerCreating`/`Running`).
+6. **Worker scaling:** `kubectl get scaledobject,pods --watch` during the same run, showing the queue backlog growing and **new worker pods being created**.
+7. The demo script finishing and automatically running `az aks stop` (the cluster entering a `Stopped`/`Stopping` state, e.g. `az aks show ... --query powerState`).
 
 Students should also submit this file:
 
