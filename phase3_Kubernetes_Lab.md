@@ -708,7 +708,7 @@ Before generating load, confirm one job goes through:
 
 ```powershell
 $ip = "<YOUR_EXTERNAL_IP>"
-Invoke-RestMethod -Uri "http://$ip:3000/api/jobs" -Method Post -ContentType "application/json" -Body '{"prompt":"verify"}'
+Invoke-RestMethod -Uri "http://${ip}:3000/api/jobs" -Method Post -ContentType "application/json" -Body '{"prompt":"verify"}'
 ```
 
 A real `_id` and `status: queued` in the response mean the write reached MongoDB. (You can also refresh `http://<YOUR_EXTERNAL_IP>:3000` and see it under **Recent Jobs**.)
@@ -718,13 +718,13 @@ A real `_id` and `status: queued` in the response mean the write reached MongoDB
 **Window 1 — API scaling (CPU):**
 
 ```bash
-kubectl get hpa,pods --watch
+kubectl get hpa --watch
 ```
 
 **Window 2 — worker scaling (queue depth):**
 
 ```bash
-kubectl get scaledobject,pods --watch
+kubectl get scaledobject --watch
 ```
 
 ## 4. Run the demo script (Window 3)
@@ -749,14 +749,14 @@ $parallel     = 20                             # how many concurrent POST loops
 $durationSec  = 180                            # how long to generate load (seconds)
 $scaleDownSec = 150                            # how long to watch pods scale back down before stopping
 
-Write-Host "Generating load against http://$ip:3000 for $durationSec seconds..."
+Write-Host "Generating load against http://${ip}:3000 for $durationSec seconds..."
 
 # Each POST loads the API (CPU) AND adds a queued job (worker backlog) -> both autoscalers react.
 1..$parallel | ForEach-Object {
   Start-Job -ArgumentList $ip, $body -ScriptBlock {
     param($ip, $body)
     while ($true) {
-      try { Invoke-RestMethod -Uri "http://$ip:3000/api/jobs" -Method Post -ContentType "application/json" -Body $body | Out-Null } catch {}
+      try { Invoke-RestMethod -Uri "http://${ip}:3000/api/jobs" -Method Post -ContentType "application/json" -Body $body | Out-Null } catch {}
     }
   } | Out-Null
 }
