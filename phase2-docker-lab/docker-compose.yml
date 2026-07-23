@@ -6,8 +6,8 @@ services:
       - "3000:3000"
       - "9229:9229" # 2. Exposed unique debug port
     volumes:
-      - ./api:/usr/src/app # 3. Mounted local code to sync breakpoints
-    working_dir: /usr/src/app
+      - ./api/server.js:/app/server.js # 3. Mounted local code to sync breakpoints
+    working_dir: /app
     env_file:
       - .env
     environment:
@@ -24,8 +24,8 @@ services:
     ports:
       - "9230:9230" # 2. Exposed unique worker debug port
     volumes:
-      - ./worker:/usr/src/app # 3. Mounted local worker code
-    working_dir: /usr/src/app
+      - ./worker/worker.js:/app/worker.js # 3. Mounted local worker code
+    working_dir: /app
     env_file:
       - .env
     environment:

@@ -8,7 +8,7 @@
       "port": 9229,
       "address": "localhost",
       "localRoot": "${workspaceFolder}/api",
-      "remoteRoot": "/usr/src/app",
+      "remoteRoot": "/app",
       "skipFiles": ["<node_internals>/**"]
     },
     {
@@ -18,7 +18,7 @@
       "port": 9230,
       "address": "localhost",
       "localRoot": "${workspaceFolder}/worker",
-      "remoteRoot": "/usr/src/app",
+      "remoteRoot": "/app",
       "skipFiles": ["<node_internals>/**"]
     }
   ],
